@@ -1,90 +1,107 @@
 import pygame
-import math
-import random
+from pygame.locals import *
+from OpenGL.GL import *
+from OpenGL.GL.shaders import compileProgram, compileShader
+import numpy as np
+
+vertex_shader = """
+#version 120
+attribute vec2 position;
+varying vec2 uv;
+void main() {
+    gl_Position = vec4(position, 0.0, 1.0);
+    uv = (position + 1.0) * 0.5;
+}
+"""
+
+fragment_shader = """
+#version 120
+uniform sampler2D texture;
+uniform float time;
+uniform vec2 mouse_pos;
+uniform float click_time;
+varying vec2 uv;
+
+void main() {
+    vec2 p = uv * 2.0 - 1.0;
+    float len = length(p);
+    
+    // 基本の波紋
+    vec2 ripple = uv + (p/len)*cos(len*12.0-time*4.0)*0.03;
+    
+    // クリックによる波紋
+    vec2 click_p = mouse_pos * 2.0 - 1.0;
+    float click_len = length(p - click_p);
+    float click_strength = max(0.0, 1.0 - (time - click_time) * 2.0);
+    ripple += (p-click_p)/click_len * cos(click_len*20.0 - (time-click_time)*10.0) * 0.05 * click_strength;
+    
+    float delta = 0.05 * sin(len*12.0-time*4.0);
+    delta += 0.1 * sin(click_len*20.0 - (time-click_time)*10.0) * click_strength;
+    
+    vec3 color = texture2D(texture, ripple).rgb;
+    gl_FragColor = vec4(color + delta, 1.0);
+}
+"""
+
+def create_shader_program():
+    return compileProgram(
+        compileShader(vertex_shader, GL_VERTEX_SHADER),
+        compileShader(fragment_shader, GL_FRAGMENT_SHADER)
+    )
 
 pygame.init()
-width, height = 800, 600
-screen = pygame.display.set_mode((width, height))
-pygame.display.set_caption("Drag to create fading ripples")
+display = (800, 600)
+pygame.display.set_mode(display, DOUBLEBUF | OPENGL)
 
-BLACK = (0, 0, 0)
-WHITE = (100, 100, 100)
+background = pygame.image.load("AdobeStock_Cave.jpeg").convert()
+background = pygame.transform.scale(background, display)
+img_data = pygame.image.tostring(background, 'RGB', 1)
 
-# 背景画像の読み込み
-background = pygame.image.load("AdobeStock_Cave.jpeg").convert_alpha()
+texture = glGenTextures(1)
+glBindTexture(GL_TEXTURE_2D, texture)
+glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, display[0], display[1], 0, GL_RGB, GL_UNSIGNED_BYTE, img_data)
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
 
-class Ripple:
-    # (クラスの内容は前述のものと同じ)
-    def __init__(self, x, y):
-        self.x = x
-        self.y = y
-        self.radius = 0
-        self.max_radius = 100
-        self.speed = 1.5
-        self.alpha = 255
-        self.amplitude = 1.0
-        self.phase = 0
-        self.wave_amplitude = 10  # 波の振幅
-        self.wave_speed = 0.1     # 波の速度
+shader = create_shader_program()
+glUseProgram(shader)
 
-    def update(self):
-        self.radius += self.speed
-        # 半径が最大値の半分を超えたら、フェードアウトを開始
-        if self.radius > self.max_radius / 2:
-            self.alpha = max(0, self.alpha - 10)
-            self.amplitude = max(0.0, self.amplitude - 0.01)
-        self.phase += self.wave_speed
+vertices = np.array([-1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0], dtype=np.float32)
+vbo = glGenBuffers(1)
+glBindBuffer(GL_ARRAY_BUFFER, vbo)
+glBufferData(GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL_STATIC_DRAW)
 
-        return self.alpha > 0
+position = glGetAttribLocation(shader, "position")
+glEnableVertexAttribArray(position)
+glVertexAttribPointer(position, 2, GL_FLOAT, GL_FALSE, 0, None)
 
-    def draw(self, surface):
-        if self.alpha > 0:
-            # 同心円を描画する
-            for r in range(int(self.radius), 0, -10):
-                # 水面の揺れを表現するためにランダムな変位を加える
-                x_offset = int(math.sin(self.phase + r / 10) * self.wave_amplitude)
-                y_offset = int(math.cos(self.phase + r / 10) * self.wave_amplitude)
-                pygame.draw.circle(surface, (*WHITE, int(self.alpha * (1 - r / self.radius) * self.amplitude)), (int(self.x + x_offset), int(self.y + y_offset)), r, 2)
+time_loc = glGetUniformLocation(shader, "time")
+mouse_pos_loc = glGetUniformLocation(shader, "mouse_pos")
+click_time_loc = glGetUniformLocation(shader, "click_time")
 
-# ripples リストを初期化
-ripples = []
-dragging = False
-last_pos = None
-min_distance = 20
-
-running = True
 clock = pygame.time.Clock()
+start_time = pygame.time.get_ticks()
+last_click_time = 0
+mouse_pos = [0.5, 0.5]
 
-while running:
+while True:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
-            running = False
-        # (イベント処理は前述のものと同じ)
-        elif event.type == pygame.MOUSEBUTTONDOWN:
-            dragging = True
+            pygame.quit()
+            quit()
+        elif event.type == pygame.MOUSEBUTTONDOWN or event.type == pygame.MOUSEMOTION and event.buttons[0]:
             x, y = pygame.mouse.get_pos()
-            ripples.append(Ripple(x, y))
-            last_pos = (x, y)
-        elif event.type == pygame.MOUSEBUTTONUP:
-            dragging = False
-            last_pos = None
-    
-    if dragging:
-        x, y = pygame.mouse.get_pos()
-        if last_pos:
-            distance = math.sqrt((x - last_pos[0])**2 + (y - last_pos[1])**2)
-            if distance >= min_distance:
-                ripples.append(Ripple(x, y))
-                last_pos = (x, y)
+            mouse_pos = [x / display[0], 1 - y / display[1]]
+            last_click_time = (pygame.time.get_ticks() - start_time) / 1000.0
 
-    # 背景画像の描画
-    screen.blit(background, (0, 0))
+    glClear(GL_COLOR_BUFFER_BIT)
 
-    ripples = [ripple for ripple in ripples if ripple.update()]
-    for ripple in ripples:
-        ripple.draw(screen)
+    current_time = (pygame.time.get_ticks() - start_time) / 1000.0
+    glUniform1f(time_loc, current_time)
+    glUniform2f(mouse_pos_loc, mouse_pos[0], mouse_pos[1])
+    glUniform1f(click_time_loc, last_click_time)
+
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4)
 
     pygame.display.flip()
     clock.tick(60)
-
-pygame.quit()
